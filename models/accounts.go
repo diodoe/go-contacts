@@ -1,11 +1,13 @@
 package models
 
 import (
-	"github.com/dgrijalva/jwt-go"
+	"errors"
 	u "go-contacts/utils"
-	"strings"
-	"github.com/jinzhu/gorm"
 	"os"
+	"strings"
+
+	"github.com/dgrijalva/jwt-go"
+	"github.com/jinzhu/gorm"
 	"golang.org/x/crypto/bcrypt"
 )
 
@@ -20,13 +22,13 @@ type Token struct {
 //a struct to rep user account
 type Account struct {
 	gorm.Model
-	Email string `json:"email"`
+	Email    string `json:"email"`
 	Password string `json:"password"`
-	Token string `json:"token";sql:"-"`
+	Token    string `json:"token";sql:"-"`
 }
 
 //Validate incoming user details...
-func (account *Account) Validate() (map[string] interface{}, bool) {
+func (account *Account) Validate() (map[string]interface{}, bool) {
 
 	if !strings.Contains(account.Email, "@") {
 		return u.Message(false, "Email address is required"), false
@@ -51,7 +53,7 @@ func (account *Account) Validate() (map[string] interface{}, bool) {
 	return u.Message(false, "Requirement passed"), true
 }
 
-func (account *Account) Create() (map[string] interface{}) {
+func (account *Account) Create() map[string]interface{} {
 
 	if resp, ok := account.Validate(); !ok {
 		return resp
@@ -66,42 +68,57 @@ func (account *Account) Create() (map[string] interface{}) {
 		return u.Message(false, "Failed to create account, connection error.")
 	}
 
-	//Create new JWT token for the newly registered account
-	tk := &Token{UserId: account.ID}
-	token := jwt.NewWithClaims(jwt.GetSigningMethod("HS256"), tk)
-	tokenString, _ := token.SignedString([]byte(os.Getenv("token_password")))
-	account.Token = tokenString
-
 	account.Password = "" //delete password
-
+	account.GenerateToken()
 	response := u.Message(true, "Account has been created")
 	response["account"] = account
 	return response
 }
 
-func Login(email, password string) (map[string]interface{}) {
+func (account *Account) GenerateToken() string {
+	//Create new JWT token for the newly registered account
+	tk := &Token{UserId: account.ID}
+	token := jwt.NewWithClaims(jwt.GetSigningMethod("HS256"), tk)
+	tokenString, _ := token.SignedString([]byte(os.Getenv("token_password")))
+	account.Token = tokenString
+	return tokenString
+}
 
-	account := &Account{}
+func (account *Account) CheckPassword(password string) bool {
+	err := bcrypt.CompareHashAndPassword([]byte(account.Password), []byte(password))
+	if err != nil && err == bcrypt.ErrMismatchedHashAndPassword { //Password does not match!
+		return false
+	}
+	return true
+}
+
+func (account *Account) exists(email string) (bool, error) {
 	err := GetDB().Table("accounts").Where("email = ?", email).First(account).Error
 	if err != nil {
 		if err == gorm.ErrRecordNotFound {
-			return u.Message(false, "Email address not found")
+			return false, errors.New("Email address not found")
 		}
-		return u.Message(false, "Connection error. Please retry")
+		return false, errors.New("Connection error. Please retry")
+	}
+	return true, nil
+}
+
+func Login(email, password string) map[string]interface{} {
+
+	account, err := GetUserByEmail(email)
+
+	if err != nil {
+		return u.Message(false, err.Error())
 	}
 
-	err = bcrypt.CompareHashAndPassword([]byte(account.Password), []byte(password))
-	if err != nil && err == bcrypt.ErrMismatchedHashAndPassword { //Password does not match!
+	if !account.CheckPassword(password) { //Password does not match!
 		return u.Message(false, "Invalid login credentials. Please try again")
 	}
 	//Worked! Logged In
 	account.Password = ""
 
 	//Create JWT token
-	tk := &Token{UserId: account.ID}
-	token := jwt.NewWithClaims(jwt.GetSigningMethod("HS256"), tk)
-	tokenString, _ := token.SignedString([]byte(os.Getenv("token_password")))
-	account.Token = tokenString //Store the token in the response
+	account.GenerateToken()
 
 	resp := u.Message(true, "Logged In")
 	resp["account"] = account
@@ -118,4 +135,16 @@ func GetUser(u uint) *Account {
 
 	acc.Password = ""
 	return acc
+}
+
+func GetUserByEmail(email string) (*Account, error) {
+	account := &Account{}
+	err := GetDB().Table("accounts").Where("email = ?", email).First(account).Error
+	if err != nil {
+		if err == gorm.ErrRecordNotFound {
+			return account, errors.New("Email address not found")
+		}
+		return account, errors.New("Connection error. Please retry")
+	}
+	return account, nil
 }
